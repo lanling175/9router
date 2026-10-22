@@ -6,15 +6,21 @@ on:
       - "v*"
   workflow_dispatch:
     inputs:
-      release_tag:
-        description: "Existing vX.Y.Z tag to publish"
-        required: true
-        type: string
-      promote_latest:
-        description: "Promote this republish to latest"
-        required: false
-        default: false
-        type: boolean
+          release_tag:
+            description: "Existing vX.Y.Z tag to publish; empty derives the version from package.json"
+            required: false
+            default: ""
+            type: string
+          source_ref:
+            description: "Source branch, tag, or commit to build; empty uses the dispatched ref"
+            required: false
+            default: ""
+            type: string
+          promote_latest:
+            description: "Promote this republish to latest"
+            required: false
+            default: false
+            type: boolean
 
 # Keep every release in one FIFO queue. A per-tag group would still allow an
 # older release to finish after a newer release and move latest backwards.
@@ -46,13 +52,14 @@ jobs:
       - name: Check out release tag
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.release_tag || github.ref_name }}
+          ref: ${{ inputs.source_ref || github.ref_name }}
           fetch-depth: 1
 
       - name: Validate tag and package versions
         id: release
         env:
-          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_REF: ${{ inputs.source_ref || github.ref_name }}
           REPOSITORY: ${{ github.repository }}
           EVENT_NAME: ${{ github.event_name }}
           PROMOTE_LATEST_INPUT: ${{ inputs.promote_latest && 'true' || 'false' }}
@@ -61,13 +68,20 @@ jobs:
           const fs = require("fs");
           const { execFileSync } = require("child_process");
 
-          const tag = process.env.RELEASE_TAG || "";
-          const match = /^v((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)$/.exec(tag);
+          const sourceRef = process.env.SOURCE_REF || "";
+          const rootVersion = require("./package.json").version;
+          const cliVersion = require("./cli/package.json").version;
+          const requestedTag = process.env.RELEASE_TAG || "";
+          const semverPattern = /^v((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)$/;
+          const sourceTagMatch = semverPattern.exec(sourceRef);
+          const tag = requestedTag || (sourceTagMatch ? sourceRef : `v${rootVersion}`);
 
           if (tag.includes("+")) {
             console.error(`Build metadata is not supported in Docker release tags: ${tag}`);
             process.exit(1);
           }
+
+          const match = semverPattern.exec(tag);
 
           if (!match) {
             console.error(`Expected a Docker-safe semver tag like v0.5.81 or v0.5.81-rc.1, received: ${tag || "<empty>"}`);
@@ -75,6 +89,7 @@ jobs:
           }
 
           const version = match[1];
+
           if (version.length > 128 || !/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/.test(version)) {
             console.error(`Version is not a valid Docker tag: ${version}`);
             process.exit(1);
@@ -90,11 +105,13 @@ jobs:
             }
           }
 
-          const rootVersion = require("./package.json").version;
-          const cliVersion = require("./cli/package.json").version;
-
           if (rootVersion !== version) {
             console.error(`package.json version ${rootVersion} does not match tag ${tag}`);
+            process.exit(1);
+          }
+
+          if (cliVersion !== version) {
+            console.error(`cli/package.json version ${cliVersion} does not match tag ${tag}`);
             process.exit(1);
           }
 
